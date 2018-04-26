@@ -21,11 +21,11 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
-
-	"github.com/ghodss/yaml"
+	"strings"
 
 	"k8s.io/helm/pkg/proto/hapi/chart"
 )
@@ -159,61 +159,69 @@ func Save(c *chart.Chart, outDir string) (string, error) {
 
 func writeTarContents(out *tar.Writer, c *chart.Chart, prefix string) error {
 	base := filepath.Join(prefix, c.Metadata.Name)
-
-	// Save Chart.yaml
-	cdata, err := yaml.Marshal(c.Metadata)
-	if err != nil {
-		return err
-	}
-	if err := writeToTar(out, base+"/Chart.yaml", cdata); err != nil {
+	if err := writeToTar(out, base); err != nil {
 		return err
 	}
 
-	// Save values.yaml
-	if c.Values != nil && len(c.Values.Raw) > 0 {
-		if err := writeToTar(out, base+"/values.yaml", []byte(c.Values.Raw)); err != nil {
-			return err
-		}
-	}
-
-	// Save templates
-	for _, f := range c.Templates {
-		n := filepath.Join(base, f.Name)
-		if err := writeToTar(out, n, f.Data); err != nil {
-			return err
-		}
-	}
-
-	// Save files
-	for _, f := range c.Files {
-		n := filepath.Join(base, f.TypeUrl)
-		if err := writeToTar(out, n, f.Value); err != nil {
-			return err
-		}
-	}
-
-	// Save dependencies
-	for _, dep := range c.Dependencies {
-		if err := writeTarContents(out, dep, base+"/charts"); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-// writeToTar writes a single file to a tar archive.
-func writeToTar(out *tar.Writer, name string, body []byte) error {
-	// TODO: Do we need to create dummy parent directory names if none exist?
-	h := &tar.Header{
-		Name: name,
-		Mode: 0755,
-		Size: int64(len(body)),
-	}
-	if err := out.WriteHeader(h); err != nil {
+func writeToTar(out *tar.Writer, source string) error {
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
 		return err
 	}
-	if _, err := out.Write(body); err != nil {
-		return err
+
+	var base string
+	if sourceInfo.IsDir() {
+		base = filepath.Base(source)
 	}
-	return nil
+
+	fmt.Printf("base: %q\n", base)
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		fmt.Printf("source: %q\n", source)
+		fmt.Printf("path: %q\n", source)
+		if err != nil {
+			return err
+		}
+
+		h, err := tar.FileInfoHeader(info, path)
+		if err != nil {
+			return err
+		}
+
+		if base != "" {
+			h.Name = filepath.Join(base, strings.TrimPrefix(path, source))
+		}
+
+		h.Name = strings.Replace(h.Name, "\\", "/", -1)
+		fmt.Printf("h.Name: %q\n", h.Name)
+
+		if info.IsDir() {
+			h.Name += "/"
+		}
+
+		if err := out.WriteHeader(h); err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		if h.Typeflag == tar.TypeReg {
+			fmt.Printf("opening path: %q\n", path)
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			_, err = io.Copy(out, file)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
